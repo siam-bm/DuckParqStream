@@ -11,7 +11,7 @@ import logging
 from config import (
     DATA_DIR, DUCKDB_FILE, DUCKDB_MEMORY_LIMIT,
     DUCKDB_THREADS, MAX_QUERY_RESULTS, DEFAULT_LIMIT,
-    DATE_FIELD, ID_FIELD
+    DATE_FIELD, ID_FIELD, TYPE_FIELD
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -46,21 +46,108 @@ class DuckDBQueryEngine:
             logger.error(f"❌ DuckDB connection failed: {e}")
             raise
 
-    def _register_parquet_view(self):
-        """Create view pointing to all Parquet files"""
-        parquet_pattern = str(self.data_dir / "*.parquet")
+    def _get_parquet_files_for_range(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        data_type: Optional[str] = None
+    ) -> List[Path]:
+        """
+        Find relevant Parquet files based on date range and type
+        Uses directory structure: year/month/type_fromDay_toDay.parquet
+        """
+        files = []
 
-        # Check if any parquet files exist
-        if not list(self.data_dir.glob("*.parquet")):
-            logger.warning("⚠️ No Parquet files found yet")
+        # If no filters, get all parquet files recursively
+        if not start_date and not end_date and not data_type:
+            files = list(self.data_dir.rglob("*.parquet"))
+            return files
+
+        # Walk through the directory structure
+        for year_dir in self.data_dir.iterdir():
+            if not year_dir.is_dir():
+                continue
+
+            try:
+                year = int(year_dir.name)
+            except ValueError:
+                continue
+
+            # Check if year is in range
+            if start_date and year < start_date.year:
+                continue
+            if end_date and year > end_date.year:
+                continue
+
+            for month_dir in year_dir.iterdir():
+                if not month_dir.is_dir():
+                    continue
+
+                try:
+                    month = int(month_dir.name)
+                except ValueError:
+                    continue
+
+                # Check if month is in range
+                if start_date and (year == start_date.year and month < start_date.month):
+                    continue
+                if end_date and (year == end_date.year and month > end_date.month):
+                    continue
+
+                # Get parquet files in this month
+                for parquet_file in month_dir.glob("*.parquet"):
+                    # Filter by type if specified
+                    if data_type:
+                        # Filename format: type_fromDay_toDay.parquet
+                        file_type = parquet_file.stem.split('_')[0]
+                        if file_type != data_type.lower():
+                            continue
+
+                    files.append(parquet_file)
+
+        return files
+
+    def _register_parquet_view(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        data_type: Optional[str] = None
+    ):
+        """
+        Create view pointing to relevant Parquet files
+        Intelligently filters based on date range and type
+        """
+        # Get relevant files
+        files = self._get_parquet_files_for_range(start_date, end_date, data_type)
+
+        if not files:
+            logger.warning("⚠️ No Parquet files found for specified criteria")
             return
 
-        self.connection.execute(f"""
-            CREATE OR REPLACE VIEW all_records AS
-            SELECT * FROM read_parquet('{parquet_pattern}')
-        """)
+        # Create pattern for DuckDB
+        if len(files) == 1:
+            parquet_pattern = str(files[0]).replace('\\', '/')
+        else:
+            # Use list of files for efficiency
+            file_list = [str(f).replace('\\', '/') for f in files]
+            parquet_pattern = "['" + "','".join(file_list) + "']"
 
-        logger.info(f"📊 Registered Parquet view: {parquet_pattern}")
+        try:
+            self.connection.execute(f"""
+                CREATE OR REPLACE VIEW all_records AS
+                SELECT * FROM read_parquet({parquet_pattern})
+            """)
+
+            logger.info(f"📊 Registered {len(files)} Parquet file(s)")
+        except Exception as e:
+            logger.error(f"Failed to register view: {e}")
+            # Fallback to recursive glob
+            parquet_pattern = str(self.data_dir / "**" / "*.parquet").replace('\\', '/')
+            self.connection.execute(f"""
+                CREATE OR REPLACE VIEW all_records AS
+                SELECT * FROM read_parquet('{parquet_pattern}')
+            """)
+            logger.info(f"📊 Registered Parquet view (recursive): {parquet_pattern}")
 
     def execute_sql(
         self,

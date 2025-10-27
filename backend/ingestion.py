@@ -12,7 +12,8 @@ from typing import Dict, List, Any, Optional
 import logging
 from config import (
     DATA_DIR, COMPRESSION, ROW_GROUP_SIZE,
-    DATE_FIELD, ID_FIELD, PARTITION_BY_WEEK
+    DATE_FIELD, INGESTED_AT_FIELD, ID_FIELD, TYPE_FIELD,
+    PARTITION_BY_DATE_RANGE, DAYS_PER_FILE
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -20,24 +21,70 @@ logger = logging.getLogger(__name__)
 
 
 class ParquetIngestionEngine:
-    """Handles JSON ingestion with weekly Parquet rotation"""
+    """Handles JSON ingestion with date-range based Parquet partitioning"""
 
     def __init__(self, data_dir: Path = DATA_DIR):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_weekly_filename(self, timestamp: Optional[datetime] = None) -> Path:
-        """Generate weekly partitioned filename"""
-        ts = timestamp or datetime.now(timezone.utc)
-        iso_cal = ts.isocalendar()
-        year, week = iso_cal.year, iso_cal.week
-        filename = f"data_{year}_w{week:02d}.parquet"
-        return self.data_dir / filename
+    def get_date_range_filename(
+        self,
+        data_date: datetime,
+        data_type: str = "default"
+    ) -> Path:
+        """
+        Generate date-range partitioned filename
+        Structure: year/month/type_fromDay_toDay.parquet
+        Example: 2025/10/log_02_20.parquet
 
-    def normalize_json_record(self, record: Dict[str, Any]) -> pd.DataFrame:
+        Args:
+            data_date: The date this data belongs to
+            data_type: Type of data (log, event, transaction, etc.)
+
+        Returns:
+            Path object for the parquet file
+        """
+        year = data_date.year
+        month = data_date.month
+        day = data_date.day
+
+        # Calculate date range for this file (20-day blocks)
+        # Day 1-20 -> 01_20, Day 21-31 -> 21_31
+        from_day = ((day - 1) // DAYS_PER_FILE) * DAYS_PER_FILE + 1
+
+        # Calculate last day of the range (min of from_day + DAYS_PER_FILE - 1 or last day of month)
+        import calendar
+        last_day_of_month = calendar.monthrange(year, month)[1]
+        to_day = min(from_day + DAYS_PER_FILE - 1, last_day_of_month)
+
+        # Create directory structure: year/month/
+        year_month_dir = self.data_dir / str(year) / f"{month:02d}"
+        year_month_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sanitize data_type (remove special characters)
+        safe_type = "".join(c for c in data_type if c.isalnum() or c in ('_', '-')).lower()
+        if not safe_type:
+            safe_type = "default"
+
+        # Create filename: type_fromDay_toDay.parquet
+        filename = f"{safe_type}_{from_day:02d}_{to_day:02d}.parquet"
+
+        return year_month_dir / filename
+
+    def normalize_json_record(
+        self,
+        record: Dict[str, Any],
+        data_date: Optional[datetime] = None,
+        data_type: Optional[str] = None
+    ) -> pd.DataFrame:
         """
         Normalize nested JSON to flat structure
         Adds metadata fields for tracking
+
+        Args:
+            record: JSON record(s) to normalize
+            data_date: The date this data belongs to (from client)
+            data_type: Type of data (from client)
         """
         # Handle both single record and list
         if not isinstance(record, list):
@@ -46,8 +93,21 @@ class ParquetIngestionEngine:
         # Flatten nested structures
         df = pd.json_normalize(record)
 
-        # Add metadata
-        df[DATE_FIELD] = datetime.now(timezone.utc)
+        # Add data_date (the date this data is FOR)
+        if data_date:
+            df[DATE_FIELD] = data_date
+        elif DATE_FIELD not in df.columns:
+            # If client didn't provide date, use current date
+            df[DATE_FIELD] = datetime.now(timezone.utc)
+
+        # Add ingested_at (when WE received it)
+        df[INGESTED_AT_FIELD] = datetime.now(timezone.utc)
+
+        # Add data_type
+        if data_type:
+            df[TYPE_FIELD] = data_type
+        elif TYPE_FIELD not in df.columns:
+            df[TYPE_FIELD] = 'default'
 
         # Ensure ID field exists
         if ID_FIELD not in df.columns:
@@ -63,13 +123,17 @@ class ParquetIngestionEngine:
     def append_to_parquet(
         self,
         records: List[Dict[str, Any]],
+        data_date: Optional[datetime] = None,
+        data_type: str = "default",
         batch_size: int = 1000
     ) -> Dict[str, Any]:
         """
-        Append JSON records to weekly Parquet file
+        Append JSON records to date-range partitioned Parquet file
 
         Args:
             records: List of JSON records to append
+            data_date: The date this data belongs to (from client)
+            data_type: Type of data (log, event, transaction, etc.)
             batch_size: Number of records to batch before writing
 
         Returns:
@@ -78,8 +142,12 @@ class ParquetIngestionEngine:
         try:
             start_time = datetime.now(timezone.utc)
 
-            # Normalize records
-            df = self.normalize_json_record(records)
+            # Use current date if not provided
+            if data_date is None:
+                data_date = datetime.now(timezone.utc)
+
+            # Normalize records with date and type
+            df = self.normalize_json_record(records, data_date, data_type)
 
             if df.empty:
                 return {
@@ -88,8 +156,8 @@ class ParquetIngestionEngine:
                     "records_processed": 0
                 }
 
-            # Get target file
-            target_file = self.get_weekly_filename()
+            # Get target file based on date and type
+            target_file = self.get_date_range_filename(data_date, data_type)
 
             # Convert to Arrow table
             table = pa.Table.from_pandas(df)

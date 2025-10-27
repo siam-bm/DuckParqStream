@@ -333,6 +333,14 @@
                 <!-- JSON Input Tab -->
                 <div id="ingest-json" class="tab-content active">
                     <div class="form-group">
+                        <label>Data Date (YYYY-MM-DD) - Optional, defaults to today</label>
+                        <input type="date" id="data-date" placeholder="2025-10-15">
+                    </div>
+                    <div class="form-group">
+                        <label>Data Type (log, event, transaction, etc.)</label>
+                        <input type="text" id="data-type" value="default" placeholder="log">
+                    </div>
+                    <div class="form-group">
                         <label>JSON Records (array or single object)</label>
                         <textarea id="json-input" placeholder='[{"id": "123", "name": "John", "value": 42}]'></textarea>
                     </div>
@@ -508,14 +516,30 @@
                     records = [records];
                 }
 
+                // Get date and type
+                const dataDate = document.getElementById('data-date').value || null;
+                const dataType = document.getElementById('data-type').value || 'default';
+
+                const payload = {
+                    records: records,
+                    data_date: dataDate,
+                    data_type: dataType
+                };
+
                 const response = await fetch(`${API_BASE}/ingest`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({records})
+                    body: JSON.stringify(payload)
                 });
 
                 const data = await response.json();
-                showSuccess('ingest-results', `✅ Ingested ${data.records_processed} records`, data);
+
+                let message = `✅ Ingested ${data.records_processed} records`;
+                if (data.file) {
+                    message += `<br>📁 File: ${data.file}`;
+                }
+
+                showSuccess('ingest-results', message, data);
                 loadStatistics();
             } catch (error) {
                 showError('ingest-results', error.message);
@@ -566,14 +590,27 @@
                     });
                 }
 
+                // Use current date and "test" type for generated data
+                const payload = {
+                    records: records,
+                    data_date: new Date().toISOString().split('T')[0],
+                    data_type: 'test'
+                };
+
                 const response = await fetch(`${API_BASE}/ingest`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({records})
+                    body: JSON.stringify(payload)
                 });
 
                 const data = await response.json();
-                showSuccess('ingest-results', `✅ Generated and ingested ${count} test records`, data);
+
+                let message = `✅ Generated and ingested ${count} test records`;
+                if (data.file) {
+                    message += `<br>📁 File: ${data.file}`;
+                }
+
+                showSuccess('ingest-results', message, data);
                 loadStatistics();
             } catch (error) {
                 showError('ingest-results', error.message);

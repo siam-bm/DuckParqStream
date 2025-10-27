@@ -46,6 +46,16 @@ class IngestRecordRequest(BaseModel):
         description="JSON records to ingest",
         example=[{"id": "123", "name": "test", "value": 42}]
     )
+    data_date: Optional[str] = Field(
+        None,
+        description="Date this data belongs to (YYYY-MM-DD or ISO format). Defaults to current date.",
+        example="2025-10-15"
+    )
+    data_type: str = Field(
+        default="default",
+        description="Type of data (log, event, transaction, etc.)",
+        example="log"
+    )
 
 
 class QueryByIDRequest(BaseModel):
@@ -149,16 +159,45 @@ async def ingest_records(request: IngestRecordRequest):
     Ingest JSON records into Parquet storage
 
     Supports single records or batches.
-    Data is automatically partitioned by week.
+    Data is automatically partitioned by date range and type.
+
+    Example request:
+    ```json
+    {
+        "records": [{"id": "123", "name": "test"}],
+        "data_date": "2025-10-15",
+        "data_type": "log"
+    }
+    ```
+
+    This will store in: `2025/10/log_01_20.parquet`
     """
     try:
-        result = ingestion_engine.append_to_parquet(request.records)
+        # Parse data_date if provided
+        from datetime import datetime
+        data_date = None
+        if request.data_date:
+            try:
+                # Try parsing ISO format first
+                data_date = datetime.fromisoformat(request.data_date.replace('Z', '+00:00'))
+            except:
+                # Try YYYY-MM-DD format
+                data_date = datetime.strptime(request.data_date, '%Y-%m-%d')
+
+        result = ingestion_engine.append_to_parquet(
+            request.records,
+            data_date=data_date,
+            data_type=request.data_type
+        )
 
         if result["status"] == "error":
             raise HTTPException(status_code=400, detail=result["message"])
 
         return result
 
+    except ValueError as e:
+        logger.error(f"Date parsing error: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid date format: {str(e)}")
     except Exception as e:
         logger.error(f"Ingestion error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
