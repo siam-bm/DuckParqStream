@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(pip install:*)",
+      "Bash(python example.py:*)",
+      "Bash(timeout 45 python:*)",
+      "Bash(python test_api_search.py:*)",
+      "Bash(python debug_search.py:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
