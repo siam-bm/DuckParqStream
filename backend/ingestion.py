@@ -13,7 +13,7 @@ import logging
 from config import (
     DATA_DIR, COMPRESSION, ROW_GROUP_SIZE,
     DATE_FIELD, INGESTED_AT_FIELD, ID_FIELD, TYPE_FIELD,
-    PARTITION_BY_DATE_RANGE, DAYS_PER_FILE
+    PARTITION_BY_DATE_RANGE, MAX_ROWS_PER_FILE
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -27,15 +27,25 @@ class ParquetIngestionEngine:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-    def get_date_range_filename(
+    def find_or_create_file_for_date(
         self,
         data_date: datetime,
-        data_type: str = "default"
+        data_type: str = "default",
+        new_record_count: int = 0
     ) -> Path:
         """
-        Generate date-range partitioned filename
+        Find existing file that can accommodate this date or create new one
+        Uses size-based partitioning with sequential date ranges
+
+        Logic:
+        1. Check existing files in year/month for this type
+        2. If file exists and has space (< MAX_ROWS_PER_FILE), return it
+        3. If file is full, create new file starting from this date
+        4. Update previous file's end date to last record's date
+
         Structure: year/month/type_fromDay_toDay.parquet
-        Example: 2025/10/log_02_20.parquet
+        Example: log_01_05.parquet (100 rows, days 1-5)
+                 → overflow → log_05_30.parquet (new file from day 5)
 
         Args:
             data_date: The date this data belongs to
@@ -44,32 +54,75 @@ class ParquetIngestionEngine:
         Returns:
             Path object for the parquet file
         """
+        import calendar
+
         year = data_date.year
         month = data_date.month
         day = data_date.day
-
-        # Calculate date range for this file (20-day blocks)
-        # Day 1-20 -> 01_20, Day 21-31 -> 21_31
-        from_day = ((day - 1) // DAYS_PER_FILE) * DAYS_PER_FILE + 1
-
-        # Calculate last day of the range (min of from_day + DAYS_PER_FILE - 1 or last day of month)
-        import calendar
-        last_day_of_month = calendar.monthrange(year, month)[1]
-        to_day = min(from_day + DAYS_PER_FILE - 1, last_day_of_month)
 
         # Create directory structure: year/month/
         year_month_dir = self.data_dir / str(year) / f"{month:02d}"
         year_month_dir.mkdir(parents=True, exist_ok=True)
 
-        # Sanitize data_type (remove special characters)
+        # Sanitize data_type
         safe_type = "".join(c for c in data_type if c.isalnum() or c in ('_', '-')).lower()
         if not safe_type:
             safe_type = "default"
 
-        # Create filename: type_fromDay_toDay.parquet
-        filename = f"{safe_type}_{from_day:02d}_{to_day:02d}.parquet"
+        # Find all existing files for this type in this month
+        existing_files = sorted(year_month_dir.glob(f"{safe_type}_*.parquet"))
 
-        return year_month_dir / filename
+        last_day_of_month = calendar.monthrange(year, month)[1]
+
+        # Check if we can use an existing file
+        for file_path in existing_files:
+            # Parse filename: type_fromDay_toDay.parquet
+            parts = file_path.stem.split('_')
+            if len(parts) >= 3:
+                try:
+                    from_day = int(parts[-2])
+                    to_day = int(parts[-1])
+
+                    # Check if this date falls in this file's range
+                    if from_day <= day <= to_day:
+                        # Check if file has space
+                        try:
+                            existing_table = pq.read_table(file_path)
+                            current_rows = existing_table.num_rows
+
+                            # Check if adding new records would exceed limit
+                            if current_rows + new_record_count <= MAX_ROWS_PER_FILE:
+                                # File has space
+                                return file_path
+                            else:
+                                # File is full - need to create new file
+                                # Get the last date in current file
+                                df = existing_table.to_pandas()
+                                if DATE_FIELD in df.columns:
+                                    last_date_in_file = pd.to_datetime(df[DATE_FIELD]).max()
+                                    actual_last_day = last_date_in_file.day
+
+                                    # Rename current file to actual range
+                                    new_name = f"{safe_type}_{from_day:02d}_{actual_last_day:02d}.parquet"
+                                    new_path = file_path.parent / new_name
+                                    if file_path != new_path:
+                                        file_path.rename(new_path)
+                                        logger.info(f"Renamed {file_path.name} → {new_name}")
+
+                                    # Create new file starting from current day
+                                    new_file = year_month_dir / f"{safe_type}_{day:02d}_{last_day_of_month:02d}.parquet"
+                                    return new_file
+                        except Exception as e:
+                            logger.warning(f"Error reading {file_path}: {e}")
+                            continue
+
+                except (ValueError, IndexError):
+                    continue
+
+        # No suitable file found - create new one
+        # Determine start day (current day)
+        new_file = year_month_dir / f"{safe_type}_{day:02d}_{last_day_of_month:02d}.parquet"
+        return new_file
 
     def normalize_json_record(
         self,
@@ -156,8 +209,8 @@ class ParquetIngestionEngine:
                     "records_processed": 0
                 }
 
-            # Get target file based on date and type
-            target_file = self.get_date_range_filename(data_date, data_type)
+            # Get target file based on date, type, and size limits
+            target_file = self.find_or_create_file_for_date(data_date, data_type, len(df))
 
             # Convert to Arrow table
             table = pa.Table.from_pandas(df)

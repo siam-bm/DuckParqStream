@@ -20,15 +20,17 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 COMPRESSION = 'zstd'  # Options: snappy, gzip, zstd, lz4
 ROW_GROUP_SIZE = 100000  # Rows per group for optimal performance
 
-# Date-based partitioning (year/month/fromDay_toDay.parquet)
+# Date-based partitioning (year/month/type_fromDay_toDay.parquet)
 PARTITION_BY_DATE_RANGE = True
 DATE_FIELD = 'data_date'  # The date from client (when data is for)
 INGESTED_AT_FIELD = 'ingested_at'  # When we received it
 ID_FIELD = 'record_id'
 TYPE_FIELD = 'data_type'  # Type of data from client
 
-# Date range partitioning settings
-DAYS_PER_FILE = 20  # Each file contains ~20 days of data (adjustable)
+# Size-based partitioning settings
+MAX_ROWS_PER_FILE = 100  # Maximum rows per file before creating new file
+# When file reaches limit, new file created starting from overflow date
+# Example: log_01_05.parquet (100 rows) → overflow on day 5 → create log_05_30.parquet
 
 # API settings
 API_HOST = "0.0.0.0"

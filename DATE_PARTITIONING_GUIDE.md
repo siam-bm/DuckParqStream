@@ -219,20 +219,27 @@ result = query_engine.execute_sql("""
 
 ## Configuration
 
-### Adjust Days Per File
+### Adjust File Size Limit
 
 Edit `backend/config.py`:
 
 ```python
-# Each file contains 20 days by default
-DAYS_PER_FILE = 20  # Change to 10, 15, 30, etc.
+# Maximum rows per file before creating new file
+MAX_ROWS_PER_FILE = 100  # Change based on your data volume
 ```
 
+**How it works:**
+- File grows until it reaches MAX_ROWS_PER_FILE
+- When limit reached, new file created starting from overflow date
+- Previous file renamed to actual date range
+
 **Examples:**
-- `DAYS_PER_FILE = 10` → More files, smaller size
-  - `log_01_10.parquet`, `log_11_20.parquet`, `log_21_31.parquet`
-- `DAYS_PER_FILE = 30` → Fewer files, larger size
-  - `log_01_30.parquet`, `log_31_31.parquet`
+- `MAX_ROWS_PER_FILE = 100` → Small files, ~1 MB each
+  - `log_01_05.parquet` (100 rows, days 1-5)
+  - `log_05_12.parquet` (100 rows, days 5-12)
+- `MAX_ROWS_PER_FILE = 1000` → Larger files, ~10 MB each
+  - `log_01_15.parquet` (1000 rows, days 1-15)
+  - `log_15_28.parquet` (1000 rows, days 15-28)
 
 ### Default Data Type
 
